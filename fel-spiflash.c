@@ -41,7 +41,16 @@ typedef struct {
 	const char* text_description;
 } spi_flash_info_t;
 
-spi_flash_info_t spi_flash_info[] = {
+static const spi_flash_info_t spi_flash_info[] = {
+	{ .manufacturer_id = 0x00, .device_id = 0xE10B,
+	  .capacity = 0x8000000, .text_description = "XTX XT26G01A",
+	  .write_enable_cmd = 0x6,
+	  .large_erase_cmd = 0xD8, .large_erase_size = 64 * 1024,
+	  .small_erase_cmd = 0x20, .small_erase_size =  4 * 1024,
+	  .program_cmd = 0x02, .program_size = 256
+	},
+
+	/* These are unverfified */
 	{ .manufacturer_id = 0xEF, .device_id = 0x4018,
 	  .capacity = 0x1000000, .text_description = "Winbond W25Qxx",
 	  .write_enable_cmd = 0x6,
@@ -57,6 +66,8 @@ spi_flash_info_t spi_flash_info[] = {
 	  .program_cmd = 0x02, .program_size = 256
 	},
 };
+
+static const int spi_flash_count = sizeof(spi_flash_info) / sizeof(spi_flash_info[0]);
 
 /*****************************************************************************/
 
@@ -118,8 +129,8 @@ static uint32_t spi0_base;
 
 #define CMD_WRITE_ENABLE 0x06
 #define CMD_GET_JEDEC_ID 0x9F
+
 typedef struct {
-	uint16_t size;
 	uint8_t cmd;
 	uint8_t manufacturer_id;
 	uint16_t device_id;
@@ -294,23 +305,54 @@ static void prepare_spi_batch_data_transfer(feldev_handle *dev, uint32_t buf)
 
 static void spi_transaction(feldev_handle *dev, void* buf, size_t len) {
 	soc_info_t *soc_info = dev->soc_info;
-	aw_fel_write(dev, buf, soc_info->spl_addr, len);
+	size_t max_chunk_size = soc_info->scratch_addr - soc_info->spl_addr;
+
+	struct {
+		uint16_t size;
+		uint8_t data[max_chunk_size - 2];
+	} tx;
+
+	if (len > max_chunk_size - 3) {
+		printf("Transaction too large\n");
+	}
+
+	tx.size = (len << 8) | (len >> 8);
+	memcpy(tx.data, buf, len);
+
+	aw_fel_write(dev, &tx, soc_info->spl_addr, len+2);
 	prepare_spi_batch_data_transfer(dev, soc_info->spl_addr);
 	aw_fel_remotefunc_execute(dev, NULL);
-	aw_fel_read(dev, soc_info->spl_addr, buf, len);
+	aw_fel_read(dev, soc_info->spl_addr, &tx, len+2);
+	memcpy(buf, tx.data, len);
 }
 
-static spi_flash_info_t* spi_get_flash_info(feldev_handle *dev) {
+static const spi_flash_info_t* spi_get_flash_info(feldev_handle *dev) {
 	GetJEDEC jedec_id = {
-		.size = sizeof(GetJEDEC) - 2,
 		.cmd = CMD_GET_JEDEC_ID
 	};
+
 	spi_transaction(dev, &jedec_id, sizeof(jedec_id));
 
-	printf("%02x %04x\n", jedec_id.size, jedec_id.cmd);
-	printf("%02x %04x\n", jedec_id.manufacturer_id, jedec_id.device_id);
+	if (!jedec_id.device_id) {
+		printf("SPI Flash not found\n");
+		return NULL;
+	}
 
-	(void)dev;
+	for (int i = 0; i < spi_flash_count; i++) {
+		const spi_flash_info_t* info = &spi_flash_info[i];
+
+		if (info->manufacturer_id == jedec_id.manufacturer_id
+			&& info->device_id == jedec_id.device_id) {
+			return info;
+		}
+	}
+
+	if (!jedec_id.device_id) {
+		printf("SPI Flash not recognized (%02x:%04x)\n",
+			jedec_id.manufacturer_id, jedec_id.device_id);
+		return NULL;
+	}
+
 	return NULL;
 }
 
@@ -448,7 +490,7 @@ void aw_fel_spiflash_write(feldev_handle *dev,
 	void *backup = backup_sram(dev);
 	uint8_t *buf8 = (uint8_t *)buf;
 
-	spi_flash_info_t *flash_info = &spi_flash_info[0]; /* FIXME */
+	const spi_flash_info_t *flash_info = &spi_flash_info[0]; /* FIXME */
 
 	if ((offset % flash_info->small_erase_size) != 0) {
 		fprintf(stderr, "aw_fel_spiflash_write: 'addr' must be %d bytes aligned\n",
@@ -497,7 +539,7 @@ void aw_fel_spiflash_info(feldev_handle *dev)
 {
 	void *backup = backup_sram(dev);
 	spi0_init(dev);
-	spi_flash_info_t *flash_info = spi_get_flash_info(dev);
+	const spi_flash_info_t *flash_info = spi_get_flash_info(dev);
 	restore_sram(dev, backup);
 
 	/* Assume that the MISO pin is either pulled up or down */

@@ -27,7 +27,8 @@
 /*****************************************************************************/
 
 typedef struct {
-	uint32_t  id;
+	uint8_t   manufacturer_id;
+	uint16_t  device_id;
 	uint8_t   write_enable_cmd;
 	uint8_t   large_erase_cmd;
 	uint32_t  large_erase_size;
@@ -35,28 +36,26 @@ typedef struct {
 	uint32_t  small_erase_size;
 	uint8_t   program_cmd;
 	uint32_t  program_size;
-	char     *text_description;
+
+	size_t      capacity;
+	const char* text_description;
 } spi_flash_info_t;
 
 spi_flash_info_t spi_flash_info[] = {
-	{ .id = 0xEF40, .write_enable_cmd = 0x6,
+	{ .manufacturer_id = 0xEF, .device_id = 0x4018,
+	  .capacity = 0x1000000, .text_description = "Winbond W25Qxx",
+	  .write_enable_cmd = 0x6,
 	  .large_erase_cmd = 0xD8, .large_erase_size = 64 * 1024,
 	  .small_erase_cmd = 0x20, .small_erase_size =  4 * 1024,
-	  .program_cmd = 0x02, .program_size = 256,
-	  .text_description = "Winbond W25Qxx" },
-	{ .id = 0xC220, .write_enable_cmd = 0x6,
+	  .program_cmd = 0x02, .program_size = 256
+	},
+	{ .manufacturer_id = 0xC2, .device_id = 0x2018,
+	  .capacity = 0x1000000, .text_description = "Macronix MX25Lxxxx",
+	  .write_enable_cmd = 0x6,
 	  .large_erase_cmd = 0xD8, .large_erase_size = 64 * 1024,
 	  .small_erase_cmd = 0x20, .small_erase_size =  4 * 1024,
-	  .program_cmd = 0x02, .program_size = 256,
-	  .text_description = "Macronix MX25Lxxxx" },
-};
-
-spi_flash_info_t default_spi_flash_info = {
-	.id = 0x0000, .write_enable_cmd = 0x6,
-	.large_erase_cmd = 0xD8, .large_erase_size = 64 * 1024,
-	.small_erase_cmd = 0x20, .small_erase_size =  4 * 1024,
-	.program_cmd = 0x02, .program_size = 256,
-	.text_description = "Unknown",
+	  .program_cmd = 0x02, .program_size = 256
+	},
 };
 
 /*****************************************************************************/
@@ -112,6 +111,19 @@ static uint32_t spi0_base;
 #define CCM_SPI0_CLK_DIV_BY_4       (0x1001)
 #define CCM_SPI0_CLK_DIV_BY_6       (0x1002)
 #define CCM_SPI0_CLK_DIV_BY_32      (0x100f)
+
+/*
+ * SPI Flash commands
+ */
+
+#define CMD_WRITE_ENABLE 0x06
+#define CMD_GET_JEDEC_ID 0x9F
+typedef struct {
+	uint16_t size;
+	uint8_t cmd;
+	uint8_t manufacturer_id;
+	uint16_t device_id;
+} GetJEDEC;
 
 /*
  * Configure pin function on a GPIO port
@@ -280,6 +292,29 @@ static void prepare_spi_batch_data_transfer(feldev_handle *dev, uint32_t buf)
 	}
 }
 
+static void spi_transaction(feldev_handle *dev, void* buf, size_t len) {
+	soc_info_t *soc_info = dev->soc_info;
+	aw_fel_write(dev, buf, soc_info->spl_addr, len);
+	prepare_spi_batch_data_transfer(dev, soc_info->spl_addr);
+	aw_fel_remotefunc_execute(dev, NULL);
+	aw_fel_read(dev, soc_info->spl_addr, buf, len);
+}
+
+static spi_flash_info_t* spi_get_flash_info(feldev_handle *dev) {
+	GetJEDEC jedec_id = {
+		.size = sizeof(GetJEDEC) - 2,
+		.cmd = CMD_GET_JEDEC_ID
+	};
+	spi_transaction(dev, &jedec_id, sizeof(jedec_id));
+
+	printf("%02x %04x\n", jedec_id.size, jedec_id.cmd);
+	printf("%02x %04x\n", jedec_id.manufacturer_id, jedec_id.device_id);
+
+	(void)dev;
+	return NULL;
+}
+
+
 /*
  * Read data from the SPI flash. Use the first 4KiB of SRAM as the data buffer.
  */
@@ -334,8 +369,6 @@ void aw_fel_spiflash_read(feldev_handle *dev,
 /*
  * Write data to the SPI flash. Use the first 4KiB of SRAM as the data buffer.
  */
-
-#define CMD_WRITE_ENABLE 0x06
 
 void aw_fel_spiflash_write_helper(feldev_handle *dev,
 				  uint32_t offset, void *buf, size_t len,
@@ -415,7 +448,7 @@ void aw_fel_spiflash_write(feldev_handle *dev,
 	void *backup = backup_sram(dev);
 	uint8_t *buf8 = (uint8_t *)buf;
 
-	spi_flash_info_t *flash_info = &default_spi_flash_info; /* FIXME */
+	spi_flash_info_t *flash_info = &spi_flash_info[0]; /* FIXME */
 
 	if ((offset % flash_info->small_erase_size) != 0) {
 		fprintf(stderr, "aw_fel_spiflash_write: 'addr' must be %d bytes aligned\n",
@@ -462,39 +495,19 @@ void aw_fel_spiflash_write(feldev_handle *dev,
  */
 void aw_fel_spiflash_info(feldev_handle *dev)
 {
-	soc_info_t *soc_info = dev->soc_info;
-	const char *manufacturer;
-	unsigned char buf[] = { 0, 4, 0x9F, 0, 0, 0, 0x0, 0x0 };
 	void *backup = backup_sram(dev);
-
 	spi0_init(dev);
-	aw_fel_write(dev, buf, soc_info->spl_addr, sizeof(buf));
-	prepare_spi_batch_data_transfer(dev, soc_info->spl_addr);
-	aw_fel_remotefunc_execute(dev, NULL);
-	aw_fel_read(dev, soc_info->spl_addr, buf, sizeof(buf));
-
+	spi_flash_info_t *flash_info = spi_get_flash_info(dev);
 	restore_sram(dev, backup);
 
 	/* Assume that the MISO pin is either pulled up or down */
-	if (buf[5] == 0x00 || buf[5] == 0xFF) {
+	if (flash_info == NULL) {
 		printf("No SPI flash detected.\n");
 		return;
 	}
 
-	switch (buf[3]) {
-	case 0xEF:
-		manufacturer = "Winbond";
-		break;
-	case 0xC2:
-		manufacturer = "Macronix";
-		break;
-	default:
-		manufacturer = "Unknown";
-		break;
-	}
-
-	printf("Manufacturer: %s (%02Xh), model: %02Xh, size: %d bytes.\n",
-	       manufacturer, buf[3], buf[4], (1 << buf[5]));
+	printf("Device: %s (%02Xh %04X), capacity: %ld bytes.\n",
+	       flash_info->text_description, flash_info->manufacturer_id, flash_info->device_id, flash_info->capacity);
 }
 
 /*

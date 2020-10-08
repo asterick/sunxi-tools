@@ -2,14 +2,15 @@
 [![License](http://img.shields.io/badge/License-GPL-green.svg)](LICENSE.md)
 [![Build Status](https://travis-ci.org/linux-sunxi/sunxi-tools.svg?branch=master)](https://travis-ci.org/linux-sunxi/sunxi-tools)
 [![Releases](https://img.shields.io/github/release/linux-sunxi/sunxi-tools.svg)](https://github.com/linux-sunxi/sunxi-tools/releases)
+[![Commits](https://img.shields.io/github/commits-since/linux-sunxi/sunxi-tools/v1.4.svg)](https://github.com/linux-sunxi/sunxi-tools/compare/v1.4...master)
 
 Copyright (C) 2012  Alejandro Mery <amery@geeks.cl>
 <br>For a full list of contributors, see
 [this link](https://github.com/linux-sunxi/sunxi-tools/contributors)
 or use the command `git shortlog -se --no-merges`.
 
-Tools to help hacking Allwinner A10 (aka sun4i) based devices and
-its successors ([sunxi][]), that's why the 'x' in the package name.
+Command line utilities to work with devices based on [Allwinner SoC]s:
+sun4i, sun5i, ... - that's why the 'x' in the package name.
 
 ### sunxi-fexc
 `.fex` file (de)compiler
@@ -26,16 +27,24 @@ the boards.
 
 ### fex2bin
 compatiblity shortcut to call `sunxi-fexc` to compile a `.fex` file
-into the binary form used by the legacy 3.4 kernel ("linux&#8209;sunxi").
+into the binary form used by the legacy 3.4 kernel ("linux-sunxi").
 
 ### sunxi-fel
-script interface for talking to the FEL USB handler built in to
-the CPU. You activate [FEL mode] by pushing the _uboot_ / _recovery_
-button at poweron. See http://linux-sunxi.org/FEL/USBBoot for
-a detailed usage guide.
+script interface for USB communication with the FEL handler built in to
+the CPU. You usually activate [FEL mode] by pushing the _uboot_ / _recovery_
+button at poweron, or by having your device "fail over" to FEL when no other
+boot option is available. See http://linux-sunxi.org/FEL/USBBoot for a detailed
+usage guide.
+
+When called with no arguments, _sunxi-fel_ will display a short usage summary.
+
+_Note:_ Unless you select a specific device using the `--dev` or `--sid`
+options, the tool will access the first Allwinner device (in FEL mode) that it
+finds. You can print a list of all FEL devices currently connected/detected
+with `./sunxi-fel --list --verbose`.
 
 ### fel-gpio
-Simple wrapper (script) around `fel-pio` and `sunxi-fel`
+Simple wrapper (script) around `sunxi-pio` and `sunxi-fel`
 to allow GPIO manipulations via FEL
 
 ### fel-sdboot
@@ -49,11 +58,8 @@ Allwinner devices and can be used for testing. Additionally, it may
 serve as a template/example for developing simple bare metal code
 (LED blinking and other similar GPIO related things).
 
-### fel-pio
-ARM native helper (binary) for `fel-gpio`
-
 ### sunxi-pio
-Manipulate PIO register dumps
+Manipulate PIO registers/dumps
 
 ### sunxi-nand-part
 Tool for manipulating Allwinner NAND partition tables
@@ -106,8 +112,9 @@ and our default target (when simply using `make`).
 
 * `make target-tools`
 builds tools that are intended for the target (Allwinner SoC), using a
-cross-compiler. The toolchain prefix *CROSS_COMPILE* defaults to `arm-none-eabi-`,
-adjust it if needed.
+cross-compiler. The Makefile will try to auto-detect a suitable toolchain
+prefix, and falls back to `arm-none-eabi-` otherwise.
+If needed, you may override this by explicitly setting *CROSS_COMPILE*.
 <br>_Hint:_ When compiling 'natively' on the target platform you may
 simply use an empty toolchain prefix here (`make target-tools CROSS_COMPILE=`
 or `make all CROSS_COMPILE=`).
@@ -141,5 +148,5 @@ This software is licensed under the terms of GPLv2+ as defined by the
 Free Software Foundation, details can be read in the [LICENSE.md](LICENSE.md)
 file.
 
-[sunxi]: http://linux-sunxi.org
+[allwinner soc]: http://linux-sunxi.org/Allwinner_SoC_Family
 [fel mode]: http://linux-sunxi.org/FEL

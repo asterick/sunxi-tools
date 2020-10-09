@@ -127,9 +127,11 @@ static uint32_t spi0_base;
  * SPI Flash commands
  */
 
+#define CMD_PROGRAM_LOAD 0x02
 #define CMD_WRITE_ENABLE 0x06
 #define CMD_GET_FEATURE 0x0F
 #define CMD_READ_FROM_CACHE 0x0B
+#define CMD_PROGRAM_EXECUTE 0x10
 #define CMD_PAGE_READ_TO_CACHE 0x13
 #define CMD_GET_JEDEC_ID 0x9F
 
@@ -447,11 +449,45 @@ void aw_fel_spiflash_write(feldev_handle *dev,
 		return;
 	}
 
-	// TODO: DO YOUR WORST
-	(void) offset;
-	(void) buf;
-	(void) len;
-	(void) progress;
+	if (offset % 2048 || len % 2048) {
+		printf("Offset and length must be a multiple to 2048\n");
+		return ;
+	}
+
+	progress_start(progress, len);
+	while (len > 0) {
+		/* Load program */
+		uint32_t column = (offset / 2048);
+		uint8_t program_load[2048+3] = {
+			CMD_PROGRAM_LOAD,
+			(uint8_t)(column >>  8),
+			(uint8_t)(column >>  0),
+		};
+
+		memcpy(&program_load[3], buf, 2048);
+		spi_transaction(dev, &program_load, sizeof(program_load));
+
+		/* Enable write */
+		uint8_t write_enable[] = {
+			CMD_WRITE_ENABLE
+		};
+		spi_transaction(dev, &write_enable, sizeof(write_enable));
+
+		/* Program page */
+		uint8_t program_page[] = {
+			CMD_PROGRAM_EXECUTE,
+			0,0,0
+		};
+		spi_transaction(dev, &program_page, sizeof(program_page));
+
+		/* Operation in progress */
+		while (spi_flash_get_feature(dev, 0xC0) & 1) ;
+
+		offset += 2048;
+		buf += 2048;
+		len -= 2048;
+		progress_update(2048);
+	}
 
 	restore_sram(dev, backup);
 }

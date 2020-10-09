@@ -128,6 +128,9 @@ static uint32_t spi0_base;
  */
 
 #define CMD_WRITE_ENABLE 0x06
+#define CMD_GET_FEATURE 0x0F
+#define CMD_READ_FROM_CACHE 0x0B
+#define CMD_PAGE_READ_TO_CACHE 0x13
 #define CMD_GET_JEDEC_ID 0x9F
 
 typedef struct {
@@ -276,11 +279,13 @@ static void restore_sram(feldev_handle *dev, void *buf)
 	free(buf);
 }
 
-static void prepare_spi_batch_data_transfer(feldev_handle *dev, uint32_t buf)
+static void prepare_spi_batch_data_transfer(feldev_handle *dev)
 {
+	soc_info_t *soc_info = dev->soc_info;
+
 	if (spi_is_sun6i(dev)) {
 		aw_fel_remotefunc_prepare_spi_batch_data_transfer(dev,
-							    buf,
+							    soc_info->spl_addr,
 							    SUN6I_SPI0_TCR,
 							    SUN6I_TCR_XCH,
 							    SUN6I_SPI0_FIFO_STA,
@@ -291,7 +296,7 @@ static void prepare_spi_batch_data_transfer(feldev_handle *dev, uint32_t buf)
 							    SUN6I_SPI0_BCC);
 	} else {
 		aw_fel_remotefunc_prepare_spi_batch_data_transfer(dev,
-							    buf,
+							    soc_info->spl_addr,
 							    SUN4I_SPI0_CTL,
 							    SUN4I_CTL_XCH,
 							    SUN4I_SPI0_FIFO_STA,
@@ -307,23 +312,27 @@ static void spi_transaction(feldev_handle *dev, void* buf, size_t len) {
 	soc_info_t *soc_info = dev->soc_info;
 	size_t max_chunk_size = soc_info->scratch_addr - soc_info->spl_addr;
 
-	struct {
-		uint16_t size;
-		uint8_t data[max_chunk_size - 2];
+	union {
+		struct {
+			uint16_t size;
+			uint8_t data[];
+		} ;
+		uint8_t raw[max_chunk_size];
 	} tx;
 
-	if (len > max_chunk_size - 3) {
+	if (len > max_chunk_size - 2) {
 		printf("Transaction too large\n");
+		return ;
 	}
 
-	tx.size = (len << 8) | (len >> 8);
-	memcpy(tx.data, buf, len);
+	uint32_t words = (len + 5) / 4; // data payload size, plus header, rounded up to nearest word
 
-	aw_fel_write(dev, &tx, soc_info->spl_addr, len+2);
-	prepare_spi_batch_data_transfer(dev, soc_info->spl_addr);
+	tx.size = (len << 8) | (len >> 8);
+
+	memcpy(tx.data, buf, len);
+	aw_fel_write(dev, &tx, soc_info->spl_addr, words*4);
 	aw_fel_remotefunc_execute(dev, NULL);
-	aw_fel_read(dev, soc_info->spl_addr, &tx, len+2);
-	memcpy(buf, tx.data, len);
+	aw_fel_read(dev, soc_info->spl_addr + 2, buf, len);
 }
 
 static const spi_flash_info_t* spi_get_flash_info(feldev_handle *dev) {
@@ -333,7 +342,7 @@ static const spi_flash_info_t* spi_get_flash_info(feldev_handle *dev) {
 
 	spi_transaction(dev, &jedec_id, sizeof(jedec_id));
 
-	if (!jedec_id.device_id) {
+	if (jedec_id.device_id == 0 || jedec_id.device_id == 0xFFFF) {
 		printf("SPI Flash not found\n");
 		return NULL;
 	}
@@ -356,7 +365,98 @@ static const spi_flash_info_t* spi_get_flash_info(feldev_handle *dev) {
 	return NULL;
 }
 
+uint8_t spi_flash_get_feature(feldev_handle *dev, uint8_t address) {
+	uint8_t cmd[3] = { CMD_GET_FEATURE, address };
 
+	spi_transaction(dev, cmd, sizeof(cmd));
+
+	return cmd[2];
+}
+
+void aw_fel_spiflash_read(feldev_handle *dev,
+			  uint32_t offset, void *buf, size_t len,
+			  progress_cb_t progress)
+{
+	void *backup = backup_sram(dev);
+	spi0_init(dev);
+	prepare_spi_batch_data_transfer(dev);
+
+	const spi_flash_info_t *flash_info = spi_get_flash_info(dev);
+
+	if (flash_info == NULL) {
+		return;
+	}
+
+	if (len + offset > flash_info->capacity) {
+		printf("Truncating read to flash size\n");
+		len = flash_info->capacity - offset;
+	}
+
+	progress_start(progress, len);
+	while (len > 0) {
+		uint32_t block = offset / 2048;
+
+		/* Read page to cache */
+		uint8_t read_to_cache[4] = {
+			CMD_PAGE_READ_TO_CACHE,
+			(uint8_t)(block >> 16),
+			(uint8_t)(block >>  8),
+			(uint8_t)(block >>  0)
+		};
+
+		spi_transaction(dev, &read_to_cache, sizeof(read_to_cache));
+
+		/* Operation in progress */
+		while (spi_flash_get_feature(dev, 0xC0) & 1) ;
+
+		/* Read data from cache */
+		uint32_t page_addr = offset % 2048;
+		uint16_t bytes = 2048 - page_addr;
+		if (bytes > len) bytes = len;
+
+		uint8_t read_from_cache[2048+4] = {
+			CMD_READ_FROM_CACHE,
+			(uint8_t)(page_addr >>  8),
+			(uint8_t)(page_addr >>  0),
+			0,
+		};
+
+		spi_transaction(dev, &read_from_cache, 4+bytes);
+		memcpy(buf, &read_from_cache[4], bytes);
+
+		buf += bytes;
+		offset += bytes;
+		len -= bytes;
+
+		progress_update(bytes);
+	}
+
+	restore_sram(dev, backup);
+}
+
+void aw_fel_spiflash_write(feldev_handle *dev,
+			   uint32_t offset, void *buf, size_t len,
+			   progress_cb_t progress)
+{
+	void *backup = backup_sram(dev);
+	spi0_init(dev);
+	prepare_spi_batch_data_transfer(dev);
+	const spi_flash_info_t *flash_info = spi_get_flash_info(dev);
+
+	if (flash_info == NULL) {
+		return;
+	}
+
+	// TODO: DO YOUR WORST
+	(void) offset;
+	(void) buf;
+	(void) len;
+	(void) progress;
+
+	restore_sram(dev, backup);
+}
+
+#if 0
 /*
  * Read data from the SPI flash. Use the first 4KiB of SRAM as the data buffer.
  */
@@ -375,7 +475,7 @@ void aw_fel_spiflash_read(feldev_handle *dev,
 	aw_fel_write(dev, cmdbuf, soc_info->spl_addr, max_chunk_size);
 
 	spi0_init(dev);
-	prepare_spi_batch_data_transfer(dev, soc_info->spl_addr);
+	prepare_spi_batch_data_transfer(dev);
 
 	progress_start(progress, len);
 	while (len > 0) {
@@ -427,7 +527,7 @@ void aw_fel_spiflash_write_helper(feldev_handle *dev,
 	uint8_t *cmdbuf = malloc(max_chunk_size);
 	cmd_idx = 0;
 
-	prepare_spi_batch_data_transfer(dev, soc_info->spl_addr);
+	prepare_spi_batch_data_transfer(dev);
 
 	while (len > 0) {
 		while (len > 0 && max_chunk_size - cmd_idx > program_size + 64) {
@@ -531,6 +631,7 @@ void aw_fel_spiflash_write(feldev_handle *dev,
 
 	restore_sram(dev, backup);
 }
+#endif
 
 /*
  * Use the read JEDEC ID (9Fh) command.
@@ -539,12 +640,13 @@ void aw_fel_spiflash_info(feldev_handle *dev)
 {
 	void *backup = backup_sram(dev);
 	spi0_init(dev);
+	prepare_spi_batch_data_transfer(dev);
+
 	const spi_flash_info_t *flash_info = spi_get_flash_info(dev);
 	restore_sram(dev, backup);
 
 	/* Assume that the MISO pin is either pulled up or down */
 	if (flash_info == NULL) {
-		printf("No SPI flash detected.\n");
 		return;
 	}
 

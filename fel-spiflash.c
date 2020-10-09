@@ -394,7 +394,7 @@ void aw_fel_spiflash_read(feldev_handle *dev,
 
 	progress_start(progress, len);
 	while (len > 0) {
-		uint32_t block = offset / 2048;
+		uint32_t block = (offset / 2048);
 
 		/* Read page to cache */
 		uint8_t read_to_cache[4] = {

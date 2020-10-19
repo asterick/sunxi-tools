@@ -15,6 +15,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -314,13 +315,13 @@ static void spi_transaction(feldev_handle *dev, void* buf, size_t len) {
 	soc_info_t *soc_info = dev->soc_info;
 	size_t max_chunk_size = soc_info->scratch_addr - soc_info->spl_addr;
 
-	union {
-		struct {
-			uint16_t size;
-			uint8_t data[];
-		} ;
-		uint8_t raw[max_chunk_size];
-	} tx;
+	struct {
+		uint16_t size;
+		uint8_t data[];
+	} *tx;
+
+	tx = malloc(max_chunk_size);
+	assert(tx != NULL);
 
 	if (len > max_chunk_size - 2) {
 		printf("Transaction too large\n");
@@ -329,12 +330,14 @@ static void spi_transaction(feldev_handle *dev, void* buf, size_t len) {
 
 	uint32_t words = (len + 5) / 4; // data payload size, plus header, rounded up to nearest word
 
-	tx.size = (len << 8) | (len >> 8);
+	tx->size = (len << 8) | (len >> 8);
 
-	memcpy(tx.data, buf, len);
-	aw_fel_write(dev, &tx, soc_info->spl_addr, words*4);
+	memcpy(tx->data, buf, len);
+	aw_fel_write(dev, tx, soc_info->spl_addr, words*4);
 	aw_fel_remotefunc_execute(dev, NULL);
 	aw_fel_read(dev, soc_info->spl_addr + 2, buf, len);
+
+	free(tx);
 }
 
 static const spi_flash_info_t* spi_get_flash_info(feldev_handle *dev) {
